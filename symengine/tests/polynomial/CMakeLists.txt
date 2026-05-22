@@ -24,6 +24,10 @@ add_executable(test_basic_conversions test_basic_conversions.cpp)
 target_link_libraries(test_basic_conversions symengine catch)
 add_test(test_basic_conversions ${PROJECT_BINARY_DIR}/test_basic_conversions)
 
+add_executable(test_groebner test_groebner.cpp)
+target_link_libraries(test_groebner symengine catch)
+add_test(test_groebner ${PROJECT_BINARY_DIR}/test_groebner)
+
 if (WITH_FLINT)
     add_executable(test_uintpoly_flint test_uintpoly_flint.cpp)
     target_link_libraries(test_uintpoly_flint symengine catch)
