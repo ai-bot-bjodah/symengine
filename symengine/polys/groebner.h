@@ -68,6 +68,7 @@ bool is_zero_coeff(const Expression &c);
 GPoly gpoly_from_mexprpoly(const RCP<const MExprPoly> &p, const vec_basic &vars,
                            MonomialOrder order);
 RCP<const Basic> gpoly_to_basic(const GPoly &p, const vec_basic &vars);
+GPoly gpoly_reorder(const GPoly &p, MonomialOrder order);
 
 GPoly gpoly_add(const GPoly &a, const GPoly &b);
 GPoly gpoly_sub(const GPoly &a, const GPoly &b);
@@ -77,6 +78,7 @@ GPoly gpoly_rem(const GPoly &f, const std::vector<GPoly> &G);
 
 std::vector<GPoly> buchberger(std::vector<GPoly> polys);
 std::vector<GPoly> f5b(std::vector<GPoly> polys);
+std::vector<GPoly> groebner_f4(std::vector<GPoly> polys);
 
 struct GroebnerBasis
 {
@@ -85,13 +87,44 @@ struct GroebnerBasis
     MonomialOrder order;
 };
 
+enum class GroebnerAlgorithm {
+    Buchberger,
+    F5B,
+    F4,
+    FGLM,
+};
+
+struct GroebnerOptions
+{
+    MonomialOrder order = MonomialOrder::GRevLex;
+    GroebnerAlgorithm algorithm = GroebnerAlgorithm::F5B;
+    MonomialOrder start_order = MonomialOrder::GRevLex;
+};
+
+// Parameters are assumed generic: everything not listed in vars is treated as a
+// coefficient in the rational function field K(params). Specializing
+// coefficients later can change the basis. F4 and FGLM use structural zero
+// tests on Expression coefficients, so rational/numeric coefficients are the
+// reliable path and symbolic coefficients are best-effort.
+GroebnerBasis groebner_fglm(const GroebnerBasis &source, MonomialOrder target);
+
+GroebnerBasis groebner_basis(const std::vector<GPoly> &polys,
+                             const vec_basic &vars,
+                             const GroebnerOptions &options);
 GroebnerBasis groebner_basis(const std::vector<GPoly> &polys,
                              const vec_basic &vars,
                              MonomialOrder order = MonomialOrder::GRevLex);
 
 // Parameters are assumed generic: everything not listed in vars is treated as a
 // coefficient in the rational function field K(params). Specializing
-// coefficients later can change the basis.
+// coefficients later can change the basis. For Buchberger/F5B/F4 the
+// computation is performed in `options.order`; the dispatcher rebuilds the
+// internal GPolys under that order before invoking the engine. For FGLM the
+// input is built under `options.start_order`, reduced there, and converted to
+// `options.order`; FGLM is restricted to reduced zero-dimensional ideals.
+std::vector<RCP<const Basic>>
+groebner(const std::vector<RCP<const Basic>> &exprs, const vec_basic &vars,
+         const GroebnerOptions &options);
 std::vector<RCP<const Basic>>
 groebner(const std::vector<RCP<const Basic>> &exprs, const vec_basic &vars,
          MonomialOrder order = MonomialOrder::GRevLex);

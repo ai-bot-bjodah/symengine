@@ -3,9 +3,11 @@
 #include <algorithm>
 #include <cstddef>
 #include <map>
+#include <set>
 #include <utility>
 
 #include <symengine/polys/basic_conversions.h>
+#include <symengine/polys/groebner_detail.h>
 #include <symengine/symengine_exception.h>
 
 namespace SymEngine
@@ -14,11 +16,53 @@ namespace SymEngine
 namespace
 {
 
-struct Term
+using detail::Term;
+
+void assert_compatible(const GPoly &a, const GPoly &b)
 {
-    vec_int monom;
-    Expression coeff;
-};
+    SYMENGINE_ASSERT(a.nvars == b.nvars);
+    SYMENGINE_ASSERT(a.order == b.order);
+}
+
+bool gpoly_lm_less(const GPoly &a, const GPoly &b)
+{
+    return monomial_compare(a.LM(), b.LM(), a.order) < 0;
+}
+
+void sort_by_lm_desc(std::vector<GPoly> &polys)
+{
+    std::sort(polys.begin(), polys.end(),
+              [](const GPoly &a, const GPoly &b) { return gpoly_lm_less(b, a); });
+}
+
+void sort_labeled_by_lm_desc(std::vector<struct LabeledPoly> &basis);
+
+GPoly leading_term_poly(const GPoly &poly)
+{
+    GPoly result(poly.nvars, poly.order);
+    detail::insert_term(result, poly.LM(), poly.LC());
+    return result;
+}
+
+GPoly negate_gpoly(const GPoly &poly)
+{
+    GPoly result(poly.nvars, poly.order);
+    for (const auto &term : poly.terms) {
+        detail::insert_term(result, term.first, -term.second);
+    }
+    return result;
+}
+
+Term term_div(const Term &numerator, const Term &denominator)
+{
+    Term quotient = {vec_int(numerator.monom.size(), 0), Expression(0)};
+    const bool divisible
+        = monomial_div(numerator.monom, denominator.monom, quotient.monom);
+    SYMENGINE_ASSERT(divisible);
+    quotient.coeff
+        = detail::normalize_coeff(numerator.coeff / denominator.coeff);
+    return quotient;
+}
 
 struct Signature
 {
@@ -43,6 +87,14 @@ struct LabeledPoly
     }
 };
 
+void sort_labeled_by_lm_desc(std::vector<LabeledPoly> &basis)
+{
+    std::sort(basis.begin(), basis.end(),
+              [](const LabeledPoly &a, const LabeledPoly &b) {
+                  return gpoly_lm_less(b.poly, a.poly);
+              });
+}
+
 struct CriticalPair
 {
     Signature first_sig;
@@ -53,13 +105,192 @@ struct CriticalPair
     LabeledPoly second_poly;
 };
 
-void assert_compatible(const GPoly &a, const GPoly &b)
+Signature sig_mult(const Signature &sig, const vec_int &monom)
 {
-    SYMENGINE_ASSERT(a.nvars == b.nvars);
-    SYMENGINE_ASSERT(a.order == b.order);
+    vec_int product(sig.monom.size(), 0);
+    monomial_mul(sig.monom, monom, product);
+    return Signature{product, sig.index};
 }
 
-Expression expanded_coeff(const Expression &c)
+int sig_compare(const Signature &u, const Signature &v, MonomialOrder order)
+{
+    if (u.index != v.index) {
+        return u.index > v.index ? -1 : 1;
+    }
+
+    const int cmp = monomial_compare(u.monom, v.monom, order);
+    if (cmp < 0) {
+        return -1;
+    }
+    if (cmp > 0) {
+        return 1;
+    }
+    return 0;
+}
+
+int lbp_compare(const LabeledPoly &f, const LabeledPoly &g)
+{
+    const int sig_cmp = sig_compare(f.sig, g.sig, f.poly.order);
+    if (sig_cmp != 0) {
+        return sig_cmp;
+    }
+    if (f.num > g.num) {
+        return -1;
+    }
+    if (f.num < g.num) {
+        return 1;
+    }
+    return 0;
+}
+
+LabeledPoly lbp_mul_term(const LabeledPoly &f, const Term &term)
+{
+    return LabeledPoly{
+        sig_mult(f.sig, term.monom),
+        gpoly_mul_term(f.poly, term.monom, term.coeff),
+        f.num,
+    };
+}
+
+LabeledPoly lbp_sub(const LabeledPoly &f, const LabeledPoly &g)
+{
+    const LabeledPoly &max_poly = lbp_compare(f, g) < 0 ? g : f;
+    return LabeledPoly{max_poly.sig, gpoly_sub(f.poly, g.poly), max_poly.num};
+}
+
+CriticalPair critical_pair(const LabeledPoly &f, const LabeledPoly &g)
+{
+    vec_int lcm(f.poly.nvars, 0);
+    monomial_lcm(f.poly.LM(), g.poly.LM(), lcm);
+
+    const Term lt = {lcm, Expression(1)};
+    const Term uf = term_div(lt, detail::leading_term(f.poly));
+    const Term vg = term_div(lt, detail::leading_term(g.poly));
+
+    const LabeledPoly fr = lbp_mul_term(
+        LabeledPoly{f.sig, leading_term_poly(f.poly), f.num}, uf);
+    const LabeledPoly gr = lbp_mul_term(
+        LabeledPoly{g.sig, leading_term_poly(g.poly), g.num}, vg);
+
+    if (lbp_compare(fr, gr) < 0) {
+        return CriticalPair{gr.sig, vg, g, fr.sig, uf, f};
+    }
+    return CriticalPair{fr.sig, uf, f, gr.sig, vg, g};
+}
+
+int cp_compare(const CriticalPair &c, const CriticalPair &d)
+{
+    const LabeledPoly c0 = {c.first_sig, GPoly(c.first_poly.poly.nvars,
+                                               c.first_poly.poly.order),
+                            c.first_poly.num};
+    const LabeledPoly d0 = {d.first_sig, GPoly(d.first_poly.poly.nvars,
+                                               d.first_poly.poly.order),
+                            d.first_poly.num};
+
+    const int first = lbp_compare(c0, d0);
+    if (first != 0) {
+        return first;
+    }
+
+    const LabeledPoly c1 = {c.second_sig, GPoly(c.second_poly.poly.nvars,
+                                                c.second_poly.poly.order),
+                            c.second_poly.num};
+    const LabeledPoly d1 = {d.second_sig, GPoly(d.second_poly.poly.nvars,
+                                                d.second_poly.poly.order),
+                            d.second_poly.num};
+    return lbp_compare(c1, d1);
+}
+
+void sort_critical_pairs_desc(std::vector<CriticalPair> &pairs)
+{
+    std::sort(pairs.begin(), pairs.end(), [](const CriticalPair &a,
+                                             const CriticalPair &b) {
+        return cp_compare(a, b) > 0;
+    });
+}
+
+LabeledPoly s_poly(const CriticalPair &cp)
+{
+    return lbp_sub(
+        lbp_mul_term(cp.first_poly, cp.first_mul),
+        lbp_mul_term(cp.second_poly, cp.second_mul));
+}
+
+bool is_rewritable_or_comparable(const Signature &sign, unsigned int num,
+                                 const std::vector<LabeledPoly> &basis)
+{
+    for (const auto &poly : basis) {
+        if (sign.index < poly.sig.index
+            and monomial_divides(poly.poly.LM(), sign.monom)) {
+            return true;
+        }
+        if (sign.index == poly.sig.index and num < poly.num
+            and monomial_divides(poly.sig.monom, sign.monom)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+LabeledPoly f5_reduce_impl(LabeledPoly poly, const std::vector<LabeledPoly> &basis)
+{
+    if (poly.poly.is_zero()) {
+        return poly;
+    }
+
+    while (true) {
+        bool changed = false;
+
+        for (const auto &candidate : basis) {
+            if (candidate.poly.is_zero()) {
+                continue;
+            }
+            if (not monomial_divides(candidate.poly.LM(), poly.poly.LM())) {
+                continue;
+            }
+
+            const Term multiplier = term_div(detail::leading_term(poly.poly),
+                                             detail::leading_term(candidate.poly));
+            if (sig_compare(sig_mult(candidate.sig, multiplier.monom), poly.sig,
+                            poly.poly.order)
+                < 0) {
+                poly = lbp_sub(poly, lbp_mul_term(candidate, multiplier));
+                changed = true;
+                break;
+            }
+        }
+
+        if (not changed or poly.poly.is_zero()) {
+            return poly;
+        }
+    }
+}
+
+std::vector<GPoly> reorder_polys(const std::vector<GPoly> &polys,
+                                 MonomialOrder order)
+{
+    std::vector<GPoly> reordered;
+    reordered.reserve(polys.size());
+    for (const auto &poly : polys) {
+        reordered.push_back(gpoly_reorder(poly, order));
+    }
+    return reordered;
+}
+
+bool is_unit_basis(const std::vector<GPoly> &basis)
+{
+    if (basis.size() != 1 or basis.front().is_zero()) {
+        return false;
+    }
+    return basis.front().LM() == vec_int(basis.front().nvars, 0);
+}
+
+} // namespace
+
+namespace detail
+{
+
+Expression normalize_coeff(const Expression &c)
 {
     return expand(c);
 }
@@ -68,16 +299,16 @@ void insert_term(GPoly &poly, const vec_int &monom, const Expression &coeff)
 {
     SYMENGINE_ASSERT(monom.size() == poly.nvars);
 
-    Expression expanded = expanded_coeff(coeff);
-    if (is_zero_coeff(expanded)) {
+    Expression normalized = normalize_coeff(coeff);
+    if (is_zero_coeff(normalized)) {
         return;
     }
 
     auto it = poly.terms.find(monom);
     if (it == poly.terms.end()) {
-        poly.terms.insert(std::make_pair(monom, expanded));
+        poly.terms.insert(std::make_pair(monom, normalized));
     } else {
-        it->second = expanded_coeff(it->second + expanded);
+        it->second = normalize_coeff(it->second + normalized);
         if (is_zero_coeff(it->second)) {
             poly.terms.erase(it);
         }
@@ -87,51 +318,6 @@ void insert_term(GPoly &poly, const vec_int &monom, const Expression &coeff)
 Term leading_term(const GPoly &poly)
 {
     return Term{poly.LM(), poly.LC()};
-}
-
-GPoly leading_term_poly(const GPoly &poly)
-{
-    GPoly result(poly.nvars, poly.order);
-    insert_term(result, poly.LM(), poly.LC());
-    return result;
-}
-
-bool gpoly_lm_less(const GPoly &a, const GPoly &b)
-{
-    return monomial_compare(a.LM(), b.LM(), a.order) < 0;
-}
-
-void sort_by_lm_desc(std::vector<GPoly> &polys)
-{
-    std::sort(polys.begin(), polys.end(),
-              [](const GPoly &a, const GPoly &b) { return gpoly_lm_less(b, a); });
-}
-
-void sort_labeled_by_lm_desc(std::vector<LabeledPoly> &basis)
-{
-    std::sort(basis.begin(), basis.end(),
-              [](const LabeledPoly &a, const LabeledPoly &b) {
-                  return gpoly_lm_less(b.poly, a.poly);
-              });
-}
-
-GPoly negate_gpoly(const GPoly &poly)
-{
-    GPoly result(poly.nvars, poly.order);
-    for (const auto &term : poly.terms) {
-        insert_term(result, term.first, -term.second);
-    }
-    return result;
-}
-
-Term term_div(const Term &numerator, const Term &denominator)
-{
-    Term quotient = {vec_int(numerator.monom.size(), 0), Expression(0)};
-    const bool divisible
-        = monomial_div(numerator.monom, denominator.monom, quotient.monom);
-    SYMENGINE_ASSERT(divisible);
-    quotient.coeff = expanded_coeff(numerator.coeff / denominator.coeff);
-    return quotient;
 }
 
 GPoly spoly(const GPoly &f, const GPoly &g)
@@ -237,172 +423,114 @@ std::vector<GPoly> red_groebner(const std::vector<GPoly> &basis)
     return reduced;
 }
 
-Signature sig_mult(const Signature &sig, const vec_int &monom)
+std::vector<vec_int> fglm_basis_monomials(const std::vector<GPoly> &basis)
 {
-    vec_int product(sig.monom.size(), 0);
-    monomial_mul(sig.monom, monom, product);
-    return Signature{product, sig.index};
-}
-
-int sig_compare(const Signature &u, const Signature &v, MonomialOrder order)
-{
-    if (u.index != v.index) {
-        return u.index > v.index ? -1 : 1;
+    if (basis.empty()) {
+        return {};
     }
 
-    const int cmp = monomial_compare(u.monom, v.monom, order);
-    if (cmp < 0) {
-        return -1;
-    }
-    if (cmp > 0) {
-        return 1;
-    }
-    return 0;
-}
+    const unsigned int nvars = basis.front().nvars;
+    const MonomialOrder order = basis.front().order;
+    const vec_int zero_monom(nvars, 0);
 
-int lbp_compare(const LabeledPoly &f, const LabeledPoly &g)
-{
-    const int sig_cmp = sig_compare(f.sig, g.sig, f.poly.order);
-    if (sig_cmp != 0) {
-        return sig_cmp;
-    }
-    if (f.num > g.num) {
-        return -1;
-    }
-    if (f.num < g.num) {
-        return 1;
-    }
-    return 0;
-}
-
-LabeledPoly lbp_mul_term(const LabeledPoly &f, const Term &term)
-{
-    return LabeledPoly{
-        sig_mult(f.sig, term.monom),
-        gpoly_mul_term(f.poly, term.monom, term.coeff),
-        f.num,
-    };
-}
-
-LabeledPoly lbp_sub(const LabeledPoly &f, const LabeledPoly &g)
-{
-    const LabeledPoly &max_poly = lbp_compare(f, g) < 0 ? g : f;
-    return LabeledPoly{max_poly.sig, gpoly_sub(f.poly, g.poly), max_poly.num};
-}
-
-CriticalPair critical_pair(const LabeledPoly &f, const LabeledPoly &g)
-{
-    vec_int lcm(f.poly.nvars, 0);
-    monomial_lcm(f.poly.LM(), g.poly.LM(), lcm);
-
-    const Term lt = {lcm, Expression(1)};
-    const Term uf = term_div(lt, leading_term(f.poly));
-    const Term vg = term_div(lt, leading_term(g.poly));
-
-    const LabeledPoly fr = lbp_mul_term(
-        LabeledPoly{f.sig, leading_term_poly(f.poly), f.num}, uf);
-    const LabeledPoly gr = lbp_mul_term(
-        LabeledPoly{g.sig, leading_term_poly(g.poly), g.num}, vg);
-
-    if (lbp_compare(fr, gr) < 0) {
-        return CriticalPair{gr.sig, vg, g, fr.sig, uf, f};
-    }
-    return CriticalPair{fr.sig, uf, f, gr.sig, vg, g};
-}
-
-int cp_compare(const CriticalPair &c, const CriticalPair &d)
-{
-    const LabeledPoly c0 = {c.first_sig, GPoly(c.first_poly.poly.nvars,
-                                               c.first_poly.poly.order),
-                            c.first_poly.num};
-    const LabeledPoly d0 = {d.first_sig, GPoly(d.first_poly.poly.nvars,
-                                               d.first_poly.poly.order),
-                            d.first_poly.num};
-
-    const int first = lbp_compare(c0, d0);
-    if (first != 0) {
-        return first;
-    }
-
-    const LabeledPoly c1 = {c.second_sig, GPoly(c.second_poly.poly.nvars,
-                                                c.second_poly.poly.order),
-                            c.second_poly.num};
-    const LabeledPoly d1 = {d.second_sig, GPoly(d.second_poly.poly.nvars,
-                                                d.second_poly.poly.order),
-                            d.second_poly.num};
-    return lbp_compare(c1, d1);
-}
-
-void sort_critical_pairs_desc(std::vector<CriticalPair> &pairs)
-{
-    std::sort(pairs.begin(), pairs.end(), [](const CriticalPair &a,
-                                             const CriticalPair &b) {
-        return cp_compare(a, b) > 0;
-    });
-}
-
-LabeledPoly s_poly(const CriticalPair &cp)
-{
-    return lbp_sub(
-        lbp_mul_term(cp.first_poly, cp.first_mul),
-        lbp_mul_term(cp.second_poly, cp.second_mul));
-}
-
-bool is_rewritable_or_comparable(const Signature &sign, unsigned int num,
-                                 const std::vector<LabeledPoly> &basis)
-{
+    std::vector<vec_int> leading_monomials;
+    leading_monomials.reserve(basis.size());
     for (const auto &poly : basis) {
-        if (sign.index < poly.sig.index
-            and monomial_divides(poly.poly.LM(), sign.monom)) {
-            return true;
+        leading_monomials.push_back(poly.LM());
+    }
+
+    std::vector<vec_int> candidates = {zero_monom};
+    std::set<vec_int> queued = {zero_monom};
+    std::set<vec_int> seen;
+    std::vector<vec_int> staircase;
+
+    while (not candidates.empty()) {
+        std::sort(candidates.begin(), candidates.end(),
+                  [order](const vec_int &a, const vec_int &b) {
+                      return monomial_compare(a, b, order) > 0;
+                  });
+
+        vec_int current = candidates.back();
+        candidates.pop_back();
+        queued.erase(current);
+        if (not seen.insert(current).second) {
+            continue;
         }
-        if (sign.index == poly.sig.index and num < poly.num
-            and monomial_divides(poly.sig.monom, sign.monom)) {
-            return true;
+        staircase.push_back(current);
+
+        for (unsigned int i = 0; i < nvars; ++i) {
+            vec_int next = current;
+            ++next[i];
+            bool admissible = true;
+            for (const auto &leading : leading_monomials) {
+                if (monomial_divides(leading, next)) {
+                    admissible = false;
+                    break;
+                }
+            }
+            if (admissible and seen.count(next) == 0
+                and queued.insert(next).second) {
+                candidates.push_back(next);
+            }
         }
     }
-    return false;
+
+    std::sort(staircase.begin(), staircase.end(),
+              [order](const vec_int &a, const vec_int &b) {
+                  return monomial_compare(a, b, order) < 0;
+              });
+    return staircase;
 }
 
-LabeledPoly f5_reduce_impl(LabeledPoly poly, const std::vector<LabeledPoly> &basis)
+std::vector<ExpressionMatrix>
+fglm_representing_matrices(const std::vector<vec_int> &basis,
+                           const std::vector<GPoly> &groebner_basis)
 {
-    if (poly.poly.is_zero()) {
-        return poly;
+    if (basis.empty()) {
+        return {};
+    }
+    SYMENGINE_ASSERT(not groebner_basis.empty());
+
+    const unsigned int nvars = groebner_basis.front().nvars;
+    const MonomialOrder order = groebner_basis.front().order;
+    const size_t dim = basis.size();
+
+    std::map<vec_int, size_t> basis_index;
+    for (size_t i = 0; i < dim; ++i) {
+        basis_index.emplace(basis[i], i);
     }
 
-    while (true) {
-        bool changed = false;
+    std::vector<ExpressionMatrix> matrices(
+        nvars, ExpressionMatrix(dim, ExpressionVector(dim, Expression(0))));
+    for (unsigned int variable = 0; variable < nvars; ++variable) {
+        for (size_t column = 0; column < dim; ++column) {
+            vec_int monomial = basis[column];
+            ++monomial[variable];
 
-        for (const auto &candidate : basis) {
-            if (candidate.poly.is_zero()) {
-                continue;
-            }
-            if (not monomial_divides(candidate.poly.LM(), poly.poly.LM())) {
-                continue;
-            }
+            GPoly term_poly(nvars, order);
+            insert_term(term_poly, monomial, Expression(1));
+            GPoly remainder = gpoly_rem(term_poly, groebner_basis);
 
-            const Term multiplier
-                = term_div(leading_term(poly.poly), leading_term(candidate.poly));
-            if (sig_compare(sig_mult(candidate.sig, multiplier.monom), poly.sig,
-                            poly.poly.order)
-                < 0) {
-                poly = lbp_sub(poly, lbp_mul_term(candidate, multiplier));
-                changed = true;
-                break;
+            for (const auto &term : remainder.terms) {
+                auto it = basis_index.find(term.first);
+                if (it == basis_index.end()) {
+                    throw SymEngineException(
+                        "fglm expected a staircase monomial in the normal form");
+                }
+                matrices[variable][it->second][column]
+                    = normalize_coeff(term.second);
             }
-        }
-
-        if (not changed or poly.poly.is_zero()) {
-            return poly;
         }
     }
+
+    return matrices;
 }
 
-} // namespace
+} // namespace detail
 
 bool is_zero_coeff(const Expression &c)
 {
-    return expand(c) == Expression(0);
+    return detail::normalize_coeff(c) == Expression(0);
 }
 
 GPoly gpoly_from_mexprpoly(const RCP<const MExprPoly> &p, const vec_basic &vars,
@@ -435,7 +563,7 @@ GPoly gpoly_from_mexprpoly(const RCP<const MExprPoly> &p, const vec_basic &vars,
         for (size_t i = 0; i < positions.size(); ++i) {
             exponents[positions[i]] = term.first[i];
         }
-        insert_term(result, exponents, term.second);
+        detail::insert_term(result, exponents, term.second);
     }
 
     return result;
@@ -462,12 +590,21 @@ RCP<const Basic> gpoly_to_basic(const GPoly &p, const vec_basic &vars)
     return add(terms);
 }
 
+GPoly gpoly_reorder(const GPoly &p, MonomialOrder order)
+{
+    GPoly result(p.nvars, order);
+    for (const auto &term : p.terms) {
+        detail::insert_term(result, term.first, term.second);
+    }
+    return result;
+}
+
 GPoly gpoly_add(const GPoly &a, const GPoly &b)
 {
     assert_compatible(a, b);
     GPoly result = a;
     for (const auto &term : b.terms) {
-        insert_term(result, term.first, term.second);
+        detail::insert_term(result, term.first, term.second);
     }
     return result;
 }
@@ -484,7 +621,7 @@ GPoly gpoly_mul_term(const GPoly &a, const vec_int &m, const Expression &c)
     for (const auto &term : a.terms) {
         vec_int monomial(a.nvars, 0);
         monomial_mul(term.first, m, monomial);
-        insert_term(result, monomial, term.second * c);
+        detail::insert_term(result, monomial, term.second * c);
     }
     return result;
 }
@@ -495,7 +632,8 @@ GPoly gpoly_monic(const GPoly &a)
     GPoly result(a.nvars, a.order);
     const Expression leading = a.LC();
     for (const auto &term : a.terms) {
-        insert_term(result, term.first, term.second / leading);
+        detail::insert_term(result, term.first,
+                            detail::normalize_coeff(term.second / leading));
     }
     return result;
 }
@@ -517,8 +655,8 @@ GPoly gpoly_rem(const GPoly &f, const std::vector<GPoly> &G)
                 vec_int quotient(current.nvars, 0);
                 const bool ok = monomial_div(current.LM(), divisor.LM(), quotient);
                 SYMENGINE_ASSERT(ok);
-                const Expression coeff
-                    = expanded_coeff(current.LC() / divisor.LC());
+                const Expression coeff = detail::normalize_coeff(current.LC()
+                                                                 / divisor.LC());
                 current = gpoly_sub(current,
                                     gpoly_mul_term(divisor, quotient, coeff));
                 divided = true;
@@ -528,7 +666,7 @@ GPoly gpoly_rem(const GPoly &f, const std::vector<GPoly> &G)
 
         if (not divided) {
             auto leading = current.terms.begin();
-            insert_term(remainder, leading->first, leading->second);
+            detail::insert_term(remainder, leading->first, leading->second);
             current.terms.erase(leading);
         }
     }
@@ -538,7 +676,7 @@ GPoly gpoly_rem(const GPoly &f, const std::vector<GPoly> &G)
 
 std::vector<GPoly> buchberger(std::vector<GPoly> polys)
 {
-    polys = reduce_generators(std::move(polys));
+    polys = detail::reduce_generators(std::move(polys));
     if (polys.empty()) {
         return polys;
     }
@@ -554,8 +692,8 @@ std::vector<GPoly> buchberger(std::vector<GPoly> polys)
         const auto pair = pairs.back();
         pairs.pop_back();
 
-        GPoly remainder
-            = gpoly_rem(spoly(polys[pair.first], polys[pair.second]), polys);
+        GPoly remainder = gpoly_rem(detail::spoly(polys[pair.first], polys[pair.second]),
+                                    polys);
         if (remainder.is_zero()) {
             continue;
         }
@@ -568,12 +706,12 @@ std::vector<GPoly> buchberger(std::vector<GPoly> polys)
         polys.push_back(remainder);
     }
 
-    return red_groebner(polys);
+    return detail::red_groebner(polys);
 }
 
 std::vector<GPoly> f5b(std::vector<GPoly> polys)
 {
-    std::vector<GPoly> reduced = reduce_generators(std::move(polys));
+    std::vector<GPoly> reduced = detail::reduce_generators(std::move(polys));
     if (reduced.empty()) {
         return reduced;
     }
@@ -672,16 +810,81 @@ std::vector<GPoly> f5b(std::vector<GPoly> polys)
             raw_basis.push_back(gpoly_monic(poly.poly));
         }
     }
-    return red_groebner(raw_basis);
+    return detail::red_groebner(raw_basis);
+}
+
+GroebnerBasis groebner_basis(const std::vector<GPoly> &polys,
+                             const vec_basic &vars,
+                             const GroebnerOptions &options)
+{
+    GroebnerBasis result;
+    result.vars = vars;
+    result.order = options.order;
+
+    switch (options.algorithm) {
+        case GroebnerAlgorithm::Buchberger:
+            result.basis = buchberger(reorder_polys(polys, options.order));
+            return result;
+        case GroebnerAlgorithm::F5B:
+            result.basis = f5b(reorder_polys(polys, options.order));
+            return result;
+        case GroebnerAlgorithm::F4:
+            result.basis = groebner_f4(reorder_polys(polys, options.order));
+            return result;
+        case GroebnerAlgorithm::FGLM: {
+            std::vector<GPoly> start_polys
+                = reorder_polys(polys, options.start_order);
+            GroebnerBasis source{f5b(std::move(start_polys)), vars,
+                                 options.start_order};
+            if (source.basis.empty() or is_unit_basis(source.basis)) {
+                return groebner_fglm(source, options.order);
+            }
+            if (options.start_order == options.order) {
+                return GroebnerBasis{source.basis, vars, options.order};
+            }
+            return groebner_fglm(source, options.order);
+        }
+    }
+
+    throw SymEngineException("unknown Groebner algorithm");
 }
 
 GroebnerBasis groebner_basis(const std::vector<GPoly> &polys,
                              const vec_basic &vars, MonomialOrder order)
 {
-    GroebnerBasis result;
-    result.vars = vars;
-    result.order = order;
-    result.basis = f5b(polys);
+    return groebner_basis(polys, vars,
+                          GroebnerOptions{order, GroebnerAlgorithm::F5B, order});
+}
+
+std::vector<RCP<const Basic>>
+groebner(const std::vector<RCP<const Basic>> &exprs, const vec_basic &vars,
+         const GroebnerOptions &options)
+{
+    set_basic gens(vars.begin(), vars.end());
+    if (gens.size() != vars.size()) {
+        throw SymEngineException("groebner variables must be distinct");
+    }
+
+    const MonomialOrder construction_order
+        = options.algorithm == GroebnerAlgorithm::FGLM ? options.start_order
+                                                       : options.order;
+
+    std::vector<GPoly> polys;
+    polys.reserve(exprs.size());
+    for (const auto &expr : exprs) {
+        auto poly = gpoly_from_mexprpoly(
+            from_basic<MExprPoly>(expr, gens, true), vars, construction_order);
+        if (not poly.is_zero()) {
+            polys.push_back(poly);
+        }
+    }
+
+    const auto basis = groebner_basis(polys, vars, options);
+    std::vector<RCP<const Basic>> result;
+    result.reserve(basis.basis.size());
+    for (const auto &poly : basis.basis) {
+        result.push_back(gpoly_to_basic(poly, vars));
+    }
     return result;
 }
 
@@ -689,28 +892,8 @@ std::vector<RCP<const Basic>>
 groebner(const std::vector<RCP<const Basic>> &exprs, const vec_basic &vars,
          MonomialOrder order)
 {
-    set_basic gens(vars.begin(), vars.end());
-    if (gens.size() != vars.size()) {
-        throw SymEngineException("groebner variables must be distinct");
-    }
-
-    std::vector<GPoly> polys;
-    polys.reserve(exprs.size());
-    for (const auto &expr : exprs) {
-        auto poly = gpoly_from_mexprpoly(
-            from_basic<MExprPoly>(expr, gens, true), vars, order);
-        if (not poly.is_zero()) {
-            polys.push_back(poly);
-        }
-    }
-
-    const auto basis = groebner_basis(polys, vars, order);
-    std::vector<RCP<const Basic>> result;
-    result.reserve(basis.basis.size());
-    for (const auto &poly : basis.basis) {
-        result.push_back(gpoly_to_basic(poly, vars));
-    }
-    return result;
+    return groebner(exprs, vars,
+                    GroebnerOptions{order, GroebnerAlgorithm::F5B, order});
 }
 
 } // namespace SymEngine

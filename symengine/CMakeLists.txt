@@ -73,6 +73,8 @@ set(SRC
     parser/sbml/sbml_tokenizer.cpp
     polys/basic_conversions.cpp
     polys/groebner.cpp
+    polys/groebner_fglm.cpp
+    polys/groebner_f4.cpp
     polys/msymenginepoly.cpp
     polys/uexprpoly.cpp
     polys/uintpoly.cpp

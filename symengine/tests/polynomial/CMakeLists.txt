@@ -28,6 +28,18 @@ add_executable(test_groebner test_groebner.cpp)
 target_link_libraries(test_groebner symengine catch)
 add_test(test_groebner ${PROJECT_BINARY_DIR}/test_groebner)
 
+add_executable(test_groebner_fglm test_groebner_fglm.cpp)
+target_link_libraries(test_groebner_fglm symengine catch)
+add_test(test_groebner_fglm ${PROJECT_BINARY_DIR}/test_groebner_fglm)
+
+add_executable(test_groebner_f4 test_groebner_f4.cpp)
+target_link_libraries(test_groebner_f4 symengine catch)
+add_test(test_groebner_f4 ${PROJECT_BINARY_DIR}/test_groebner_f4)
+
+add_executable(test_groebner_refs test_groebner_refs.cpp)
+target_link_libraries(test_groebner_refs symengine catch)
+add_test(test_groebner_refs ${PROJECT_BINARY_DIR}/test_groebner_refs)
+
 if (WITH_FLINT)
     add_executable(test_uintpoly_flint test_uintpoly_flint.cpp)
     target_link_libraries(test_uintpoly_flint symengine catch)
