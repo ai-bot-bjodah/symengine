@@ -269,6 +269,11 @@ TEST_CASE("FGLM handles failure paths and edge cases", "[groebner][fglm]")
                                             GroebnerAlgorithm::FGLM,
                                             MonomialOrder::GRevLex}));
 
+    REQUIRE_THROWS(groebner({x}, xy,
+                            GroebnerOptions{MonomialOrder::Lex,
+                                            GroebnerAlgorithm::FGLM,
+                                            MonomialOrder::Lex}));
+
     require_basis_eq(
         groebner({integer(1)}, xy,
                  GroebnerOptions{MonomialOrder::Lex, GroebnerAlgorithm::FGLM,

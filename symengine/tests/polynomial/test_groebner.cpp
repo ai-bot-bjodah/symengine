@@ -268,6 +268,7 @@ TEST_CASE("Public groebner API handles symbolic coefficients", "[groebner]")
 {
     auto x = symbol("x");
     auto y = symbol("y");
+    auto z = symbol("z");
     auto c1 = symbol("c1");
     auto c2 = symbol("c2");
     auto c3 = symbol("c3");
@@ -288,6 +289,26 @@ TEST_CASE("Public groebner API handles symbolic coefficients", "[groebner]")
     require_basis_eq(
         quadratic,
         {SymEngine::add({x, y}), SymEngine::pow(y, integer(2))});
+
+    const vec_basic xyz = {x, y, z};
+    auto fractional_field_poly = groebner(
+        {SymEngine::add(
+             {SymEngine::mul(c1, SymEngine::mul(x, y)),
+              SymEngine::mul(c2,
+                             SymEngine::mul(SymEngine::pow(y, integer(2)), z)),
+              SymEngine::mul(c3, SymEngine::pow(z, integer(2))),
+              SymEngine::mul(integer(42), SymEngine::pow(x, integer(2)))})},
+        xyz, MonomialOrder::Lex);
+    require_basis_eq(
+        fractional_field_poly,
+        {SymEngine::add(
+            {SymEngine::pow(x, integer(2)),
+             SymEngine::mul(SymEngine::div(c1, integer(42)),
+                            SymEngine::mul(x, y)),
+             SymEngine::mul(SymEngine::div(c2, integer(42)),
+                            SymEngine::mul(SymEngine::pow(y, integer(2)), z)),
+             SymEngine::mul(SymEngine::div(c3, integer(42)),
+                            SymEngine::pow(z, integer(2)))})});
 }
 
 TEST_CASE("Ordering changes the leading monomial", "[groebner]")

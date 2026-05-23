@@ -277,14 +277,6 @@ std::vector<GPoly> reorder_polys(const std::vector<GPoly> &polys,
     return reordered;
 }
 
-bool is_unit_basis(const std::vector<GPoly> &basis)
-{
-    if (basis.size() != 1 or basis.front().is_zero()) {
-        return false;
-    }
-    return basis.front().LM() == vec_int(basis.front().nvars, 0);
-}
-
 } // namespace
 
 namespace detail
@@ -836,12 +828,6 @@ GroebnerBasis groebner_basis(const std::vector<GPoly> &polys,
                 = reorder_polys(polys, options.start_order);
             GroebnerBasis source{f5b(std::move(start_polys)), vars,
                                  options.start_order};
-            if (source.basis.empty() or is_unit_basis(source.basis)) {
-                return groebner_fglm(source, options.order);
-            }
-            if (options.start_order == options.order) {
-                return GroebnerBasis{source.basis, vars, options.order};
-            }
             return groebner_fglm(source, options.order);
         }
     }
